@@ -1,10 +1,13 @@
 {
   "name": "ltc-personal-manager",
-  "version": "1.0.0",
-  "description": "Personal read-only Litecoin Discord wallet manager",
+  "version": "2.0.0",
+  "description": "Private read-only Litecoin Discord wallet manager",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "dependencies": {
     "discord.js": "^14.25.1",
