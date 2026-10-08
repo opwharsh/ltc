@@ -6,7 +6,10 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
-  EmbedBuilder
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle
 } = require("discord.js");
 
 const fs = require("fs");
@@ -32,6 +35,7 @@ if (!CONFIG.address) {
 }
 
 const API_BASE = "https://api.blockcypher.com/v1/ltc/main";
+const PRICE_API = "https://api.coingecko.com/api/v3/simple/price?ids=litecoin&vs_currencies=usd,eur";
 const STATE_FILE = path.join(__dirname, "wallet-state.json");
 
 const client = new Client({
@@ -99,6 +103,30 @@ function fmtLtc(value) {
   })} LTC`;
 }
 
+function fmtMoney(value, currency) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "N/A";
+  const symbol = currency === "EUR" ? "€" : "$";
+  return `${symbol}${Number(value).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  })} ${currency}`;
+}
+
+async function fetchLtcPrice() {
+  try {
+    const response = await fetch(PRICE_API);
+    if (!response.ok) throw new Error(`Price API HTTP ${response.status}`);
+    const data = await response.json();
+    return {
+      usd: Number(data?.litecoin?.usd) || null,
+      eur: Number(data?.litecoin?.eur) || null
+    };
+  } catch (error) {
+    console.error("Price lookup error:", error.message);
+    return { usd: null, eur: null };
+  }
+}
+
 function shortHash(hash) {
   return `${hash.slice(0, 10)}...${hash.slice(-8)}`;
 }
@@ -154,24 +182,87 @@ function classifyRef(ref) {
   return "unknown";
 }
 
-function buildBalanceEmbed(wallet) {
+async function buildBalanceEmbed(wallet) {
   const confirmed = litoshiToLtc(wallet.final_balance);
   const unconfirmed = litoshiToLtc(wallet.unconfirmed_balance);
   const totalReceived = litoshiToLtc(wallet.total_received);
   const totalSent = litoshiToLtc(wallet.total_sent);
+  const txCount = wallet.final_n_tx ?? wallet.n_tx ?? 0;
+  const price = await fetchLtcPrice();
 
-  return new EmbedBuilder()
-    .setTitle("Litecoin Wallet")
-    .setDescription(`[${CONFIG.address}](https://litecoinspace.org/address/${CONFIG.address})`)
-    .addFields(
-      { name: "Balance", value: `**${fmtLtc(confirmed)}**`, inline: true },
-      { name: "Unconfirmed", value: fmtLtc(unconfirmed), inline: true },
-      { name: "Transactions", value: String(wallet.final_n_tx ?? wallet.n_tx ?? 0), inline: true },
-      { name: "Total Received", value: fmtLtc(totalReceived), inline: true },
-      { name: "Total Sent", value: fmtLtc(totalSent), inline: true }
+  const usdValue = price.usd !== null ? confirmed * price.usd : null;
+  const eurValue = price.eur !== null ? confirmed * price.eur : null;
+
+  const embed = new EmbedBuilder()
+    .setColor(0x345D9D)
+    .setAuthor({
+      name: "Personal LTC Wallet",
+      iconURL: "https://cryptologos.cc/logos/litecoin-ltc-logo.png?v=040"
+    })
+    .setDescription(
+      `**Litecoin Mainnet**\n` +
+      `\`${CONFIG.address}\``
     )
-    .setFooter({ text: "Read-only wallet monitor" })
+    .addFields(
+      {
+        name: "💰 Balance",
+        value: `**${fmtLtc(confirmed)}**\n${fmtMoney(usdValue, "USD")} • ${fmtMoney(eurValue, "EUR")}`,
+        inline: false
+      },
+      {
+        name: "📥 Total Received",
+        value: fmtLtc(totalReceived),
+        inline: true
+      },
+      {
+        name: "📤 Total Sent",
+        value: fmtLtc(totalSent),
+        inline: true
+      },
+      {
+        name: "🔄 Transactions",
+        value: String(txCount),
+        inline: true
+      },
+      {
+        name: "⏳ Unconfirmed",
+        value: fmtLtc(unconfirmed),
+        inline: true
+      },
+      {
+        name: "📊 LTC Price",
+        value: price.usd !== null
+          ? `${fmtMoney(price.usd, "USD")}\n${fmtMoney(price.eur, "EUR")}`
+          : "Unavailable",
+        inline: true
+      },
+      {
+        name: "🔐 Wallet Type",
+        value: "Read-only monitor",
+        inline: true
+      }
+    )
+    .setFooter({
+      text: "Live blockchain balance • Personal LTC Manager"
+    })
     .setTimestamp();
+
+  return embed;
+}
+
+function balanceButtons() {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId("refresh_balance")
+      .setLabel("Refresh Balance")
+      .setStyle(ButtonStyle.Primary)
+      .setEmoji("🔄"),
+    new ButtonBuilder()
+      .setLabel("View Address")
+      .setStyle(ButtonStyle.Link)
+      .setURL(`https://litecoinspace.org/address/${CONFIG.address}`)
+      .setEmoji("🔗")
+  );
 }
 
 async function sendNewTransactionAlert(ref) {
@@ -266,6 +357,35 @@ client.once("ready", async () => {
 });
 
 client.on("interactionCreate", async interaction => {
+  if (interaction.isButton()) {
+    if (interaction.customId !== "refresh_balance") return;
+
+    if (!isOwner(interaction)) {
+      return interaction.reply({
+        content: "You are not authorized to use this wallet manager.",
+        ephemeral: true
+      });
+    }
+
+    try {
+      await interaction.deferUpdate();
+      const wallet = await fetchWallet();
+
+      await interaction.editReply({
+        content: " ",
+        embeds: [await buildBalanceEmbed(wallet)],
+        components: [balanceButtons()]
+      });
+    } catch (error) {
+      console.error("Refresh button error:", error);
+      await interaction.followUp({
+        content: `Could not refresh the wallet: ${error.message}`,
+        ephemeral: true
+      }).catch(() => {});
+    }
+    return;
+  }
+
   if (!interaction.isChatInputCommand()) return;
 
   if (!isOwner(interaction)) {
@@ -279,7 +399,10 @@ client.on("interactionCreate", async interaction => {
     if (interaction.commandName === "balance") {
       await interaction.deferReply({ ephemeral: true });
       const wallet = await fetchWallet();
-      return interaction.editReply({ embeds: [buildBalanceEmbed(wallet)] });
+      return interaction.editReply({
+        embeds: [await buildBalanceEmbed(wallet)],
+        components: [balanceButtons()]
+      });
     }
 
     if (interaction.commandName === "address") {
@@ -299,7 +422,8 @@ client.on("interactionCreate", async interaction => {
 
       return interaction.editReply({
         content: "Wallet refreshed.",
-        embeds: [buildBalanceEmbed(wallet)]
+        embeds: [await buildBalanceEmbed(wallet)],
+        components: [balanceButtons()]
       });
     }
 
